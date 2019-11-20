@@ -32,7 +32,10 @@ class TrainDataset(Dataset):
         high_path = "./data/high/" + low_path.split('/')[-1]
         high = Image.open(high_path).convert('RGB') # 3840 * 2160
         high = self.transform(high)
-        return (low, high)
+        high2low_path = "./data/high2low/" + low_path.split('/')[-1]
+        high2low = Image.open(high2low_path).convert('RGB')
+        high2low = self.transform(high2low)
+        return (low, high, high2low)
 
 transform = transforms.Compose([
     transforms.ToTensor(),
@@ -58,6 +61,8 @@ class Net(nn.Module):
         self.conv0 = nn.Conv2d(in_channels=3, out_channels=32, kernel_size=3, stride=1, padding=1)
 
         self.conv1 = nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=1, padding=1)
+
+        self.conv2 = nn.Conv2d(in_channels=32, out_channels=3, kernel_size=3, stride=1, padding=1)
             
         self.conv3 = nn.Conv2d(in_channels=32, out_channels=128, kernel_size=3, stride=1, padding=1)
         
@@ -70,7 +75,7 @@ class Net(nn.Module):
     def _initialize_weights(self):
         init.orthogonal_(self.conv0.weight, init.calculate_gain('relu'))
         init.orthogonal_(self.conv1.weight, init.calculate_gain('relu'))
-        #init.orthogonal_(self.conv2.weight, init.calculate_gain('relu'))
+        init.orthogonal_(self.conv2.weight)
         init.orthogonal_(self.conv3.weight, init.calculate_gain('relu'))
         init.orthogonal_(self.conv4.weight)
 
@@ -85,10 +90,11 @@ class Net(nn.Module):
         x = self._block(x)
         x = self._block(x)
         x = self.relu(self.conv1(x))
+        x1 = self.conv2(x)
         x = self.relu(self.conv3(x))
         x = self.pixel_shuffle(x)
         x = self.conv4(x)
-        return x
+        return (x, x1)
 
 model = nn.DataParallel(Net()).cuda()
 #model = Net().cuda()
@@ -106,14 +112,13 @@ start_epoch = 0
 for epoch in range(start_epoch, epoches):
     epoch_loss = 0
     model.train()
-    for X, y in train_dl:
+    for X, y, m in train_dl:
         X = X.cuda()
         y = y.cuda()
-        preds = model(X)
-        loss = loss_fn(preds, y)
+        m = m.cuda()
+        preds, low = model(X)
+        loss = loss_fn(preds, y) + loss_fn(low, m)
         del preds
-        del X
-        del y
         
         optimizer.zero_grad()
         loss.backward()
@@ -121,6 +126,7 @@ for epoch in range(start_epoch, epoches):
         
         epoch_loss += loss
         print('.', end='', flush=True)
+    del X, y, m
         
     epoch_loss = epoch_loss / len(train_dl)
     print("\nEpoch: {}, train loss: {:.6f}, time: {}".format(epoch, epoch_loss, time.time() - start), flush=True)
@@ -128,16 +134,17 @@ for epoch in range(start_epoch, epoches):
     model.eval()
     with torch.no_grad():
         val_epoch_loss = 0
-        for val_X, val_y in valid_dl:
+        for val_X, val_y, val_m in valid_dl:
             val_X = val_X.cuda()
             val_y = val_y.cuda()
-            val_preds = model(val_X)
-            val_loss = loss_fn(val_preds, val_y)
+            val_m = val_m.cuda()
+            val_preds, val_low = model(val_X)
+            val_loss = loss_fn(val_preds, val_y) + loss_fn(val_low, val_m)
             del val_preds
-            del val_X
-            del val_y
 
-            val_epoch_loss += val_loss            
+            val_epoch_loss += val_loss      
+        del val_X, val_y, val_m
+
         val_epoch_loss = val_epoch_loss / len(valid_dl)
         print("Epoch: {}, valid loss: {:.6f}, time: {}\n".format(epoch, val_epoch_loss, time.time() - start), flush=True)
     
